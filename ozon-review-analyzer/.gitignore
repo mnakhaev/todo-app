@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+debug/
+reviews*.json
+report*.md
+*.csv
