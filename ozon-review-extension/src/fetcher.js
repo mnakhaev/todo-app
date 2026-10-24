@@ -155,76 +155,246 @@
     });
   }
 
+  // ------------------------------------------------------- резервный способ: HTML
+
+  /** Отзывы из data-state атрибутов (так Ozon встраивает данные виджетов в HTML). */
+  function extractFromStateAttrs(root) {
+    const out = [];
+    const nodes = root.querySelectorAll ? root.querySelectorAll("[data-state]") : [];
+    for (const el of nodes) {
+      try { out.push(...extractReviews(JSON.parse(el.getAttribute("data-state")))); } catch (_) { /* не JSON */ }
+    }
+    return out;
+  }
+
+  function extractFromHtml(html) {
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      return extractFromStateAttrs(doc);
+    } catch (_) {
+      return [];
+    }
+  }
+
   // ------------------------------------------------------------------ сбор
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  function apiUrl(base, innerPath) {
+    return `${base}?url=${encodeURIComponent(innerPath)}`;
+  }
+
+  function relative(u) {
+    try {
+      const x = new URL(u, location.origin);
+      return x.pathname + x.search;
+    } catch (_) {
+      return u;
+    }
+  }
+
+  /** Ставит номер страницы в любой из известных параметров пагинации. */
+  function withPage(innerPath, n) {
+    const [p, q = ""] = innerPath.split("?");
+    const sp = new URLSearchParams(q);
+    let changed = false;
+    for (const key of ["page", "layout_page_index", "reviewsPage"]) {
+      if (sp.has(key)) { sp.set(key, String(n)); changed = true; }
+    }
+    if (!changed) return null;
+    return `${p}?${sp.toString()}`;
+  }
+
+  /**
+   * Запросы к API, которые уже сделала сама страница Ozon (видны в performance).
+   * Если Ozon поменял формат адреса, здесь будет актуальный.
+   */
+  function observedReviewRequests() {
+    let entries = [];
+    try { entries = performance.getEntriesByType("resource").map((e) => e.name); } catch (_) { /* нет API */ }
+    const out = [];
+    for (const name of entries) {
+      if (!/\.bff\//.test(name)) continue;
+      let u;
+      try { u = new URL(name, location.origin); } catch (_) { continue; }
+      const inner = u.searchParams.get("url") || "";
+      if (!/review|отзыв/i.test(decodeURIComponent(inner + u.search))) continue;
+      out.push({ base: u.pathname, inner: inner || null, full: u.pathname + u.search });
+    }
+    return out;
+  }
+
+  /** Список способов получить первую страницу отзывов, от самого вероятного к запасным. */
+  function strategies(prodPath) {
+    const list = [];
+    const seen = new Set();
+    const add = (name, base, inner) => {
+      const key = base + "|" + inner;
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push({ name, base, inner });
+    };
+    for (const o of observedReviewRequests()) {
+      if (o.inner) add("как делает сама страница", o.base, withPage(o.inner, 1) || o.inner);
+    }
+    const noSlash = prodPath.replace(/\/$/, "");
+    add("reviews/?page", API_PATH, `${prodPath}reviews/?page=1&sort=published_at_desc`);
+    add("reviews?page", API_PATH, `${noSlash}/reviews?page=1&sort=published_at_desc`);
+    add("reviews/", API_PATH, `${prodPath}reviews/`);
+    add("reviewshelfpaginator", API_PATH, `${prodPath}?layout_container=reviewshelfpaginator&layout_page_index=1`);
+    add("composer reviews", "/api/composer-api.bff/page/json/v2", `${prodPath}reviews/?page=1`);
+    add("страница товара", API_PATH, prodPath);
+    return list;
+  }
+
+  async function requestJson(url, signal, log) {
+    let resp = null;
+    let text = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        resp = await fetch(url, { credentials: "include", headers: { Accept: "application/json" }, signal });
+        text = await resp.text();
+      } catch (e) {
+        if (signal && signal.aborted) throw e;
+        resp = null;
+      }
+      // 404/400 — адрес неверный, повторять бессмысленно; 403/429/5xx/сеть — ждём и пробуем ещё раз
+      if (resp && (resp.ok || resp.status === 404 || resp.status === 400)) break;
+      await sleep(2000 * (attempt + 1));
+    }
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { /* не JSON */ }
+    const entry = { url, status: resp ? resp.status : "network error", reviews: data ? extractReviews(data).length : 0 };
+    if (log) log.push(entry);
+    return { ok: Boolean(resp && resp.ok && data), status: entry.status, data, text };
+  }
+
   /**
    * Скачивает все отзывы товара.
    * opts: { maxPages, delayMs, onProgress({page, total, added}), signal: AbortSignal }
+   * Возвращает { reviews, title, stoppedReason, diagnostics }.
    */
   async function fetchAllReviews(prodPath, opts = {}) {
     const { maxPages = 1000, delayMs = 600, onProgress = () => {}, signal } = opts;
+    const log = [];
     const all = [];
     const seen = new Set();
     let title = null;
-    let next = reviewsPagePath(prodPath, 1);
-    let emptyStreak = 0;
+    let lastBody = "";
     let stoppedReason = null;
 
-    for (let page = 1; page <= maxPages && next; page++) {
-      if (signal && signal.aborted) { stoppedReason = "cancelled"; break; }
-      const url = `${API_PATH}?url=${encodeURIComponent(next)}`;
-      let resp = null;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        try {
-          resp = await fetch(url, { credentials: "include", headers: { Accept: "application/json" }, signal });
-        } catch (e) {
-          if (signal && signal.aborted) break;
-          resp = null;
-        }
-        if (resp && resp.ok) break;
-        await sleep(2000 * (attempt + 1)); // 403/429/сеть — ждём и пробуем ещё раз
-      }
-      if (signal && signal.aborted) { stoppedReason = "cancelled"; break; }
-      if (!resp || !resp.ok) { stoppedReason = `HTTP ${resp ? resp.status : "network error"} на странице ${page}`; break; }
-
-      let data;
-      try { data = await resp.json(); } catch (_) { stoppedReason = `ответ не JSON на странице ${page}`; break; }
-      if (!title) title = extractTitle(data);
-
-      const batch = extractReviews(data);
+    const addBatch = (batch) => {
       let added = 0;
       for (const r of batch) {
-        if (seen.has(r.id)) continue;
-        seen.add(r.id);
+        const key = r.id || `${r.author}|${r.date}|${r.text.slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         all.push(r);
         added++;
       }
-      onProgress({ page, total: all.length, added });
+      return added;
+    };
+    const diagnostics = () => ({
+      page: location.href,
+      attempts: log,
+      observed: observedReviewRequests().map((o) => o.full),
+      lastBody: lastBody.slice(0, 3000),
+      userAgent: navigator.userAgent,
+    });
 
-      emptyStreak = added ? 0 : emptyStreak + 1;
-      if (emptyStreak >= 2) break;
-
-      let nxt = extractNextPage(data);
-      if (nxt) {
-        try {
-          const u = new URL(nxt, location.origin);
-          nxt = u.pathname + u.search;
-        } catch (_) { /* оставляем как есть */ }
-        if (nxt === next) nxt = null; // защита от зацикливания
+    // 1. Подбираем рабочий способ получения первой страницы
+    let chosen = null;
+    let firstData = null;
+    try {
+      for (const s of strategies(prodPath)) {
+        if (signal && signal.aborted) break;
+        let r = await requestJson(apiUrl(s.base, s.inner), signal, log);
+        lastBody = r.text || lastBody;
+        // Ozon иногда отвечает редиректом внутри JSON
+        const redirect = r.data && (r.data.redirectUrl || r.data.redirect || (r.data.location && String(r.data.location)));
+        if (r.ok && !extractReviews(r.data).length && typeof redirect === "string") {
+          const inner = relative(redirect);
+          r = await requestJson(apiUrl(s.base, inner), signal, log);
+          lastBody = r.text || lastBody;
+          if (r.ok) s.inner = inner;
+        }
+        if (r.ok && !title) title = extractTitle(r.data);
+        if (r.ok && extractReviews(r.data).length) {
+          chosen = s;
+          firstData = r.data;
+          break;
+        }
+        await sleep(300);
       }
-      if (!nxt) {
-        const cur = Number(new URLSearchParams(next.split("?")[1] || "").get("page") || page);
-        nxt = added ? reviewsPagePath(prodPath, cur + 1) : null;
-      }
-      next = nxt;
-      await sleep(delayMs);
+    } catch (e) {
+      if (!(signal && signal.aborted)) throw e;
     }
-    return { reviews: dedupe(all), title, stoppedReason };
+    if (signal && signal.aborted) {
+      return { reviews: all, title, stoppedReason: "cancelled", diagnostics: diagnostics() };
+    }
+
+    // 2. Ни один способ API не сработал — резервный: данные из HTML
+    if (!chosen) {
+      let html = [];
+      html.push(...extractFromStateAttrs(document));
+      for (const path of [`${prodPath}reviews/`, prodPath]) {
+        try {
+          const resp = await fetch(path, { credentials: "include", signal });
+          const text = await resp.text();
+          log.push({ url: path + " (HTML)", status: resp.status, reviews: extractFromHtml(text).length });
+          html.push(...extractFromHtml(text));
+        } catch (_) { /* пропускаем */ }
+      }
+      addBatch(html);
+      onProgress({ page: 1, total: all.length, added: all.length });
+      stoppedReason = all.length
+        ? "API отзывов Ozon недоступно — показаны только отзывы, встроенные в страницу"
+        : `Ozon не отдал отзывы ни одним из ${log.length} способов`;
+      return { reviews: all, title, stoppedReason, diagnostics: diagnostics() };
+    }
+
+    // 3. Листаем страницы выбранным способом
+    let data = firstData;
+    let current = chosen.inner;
+    let pageNo = 1;
+    let emptyStreak = 0;
+    const visited = new Set([current]);
+    try {
+      while (true) {
+        const added = addBatch(extractReviews(data));
+        onProgress({ page: pageNo, total: all.length, added });
+        emptyStreak = added ? 0 : emptyStreak + 1;
+        if (emptyStreak >= 3 || pageNo >= maxPages) break;
+
+        let next = extractNextPage(data);
+        next = next ? relative(next) : null;
+        if (!next || visited.has(next)) next = withPage(current, pageNo + 1);
+        if (!next || visited.has(next)) break;
+        visited.add(next);
+
+        if (signal && signal.aborted) { stoppedReason = "cancelled"; break; }
+        await sleep(delayMs);
+        const r = await requestJson(apiUrl(chosen.base, next), signal, log);
+        if (!r.ok) {
+          lastBody = r.text || lastBody;
+          if (r.status !== 404) stoppedReason = `HTTP ${r.status} на странице ${pageNo + 1}`;
+          break;
+        }
+        data = r.data;
+        current = next;
+        pageNo++;
+      }
+    } catch (e) {
+      if (signal && signal.aborted) stoppedReason = "cancelled";
+      else stoppedReason = String((e && e.message) || e);
+    }
+    return { reviews: dedupe(all), title, stoppedReason, diagnostics: diagnostics(), method: chosen.name };
   }
 
-  const api = { productPath, productSku, reviewsPagePath, extractReviews, extractNextPage, normalizeReview, fetchAllReviews, dedupe };
+  const api = {
+    productPath, productSku, reviewsPagePath, extractReviews, extractNextPage, normalizeReview,
+    fetchAllReviews, dedupe, withPage, extractFromHtml,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.OzonFetcher = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

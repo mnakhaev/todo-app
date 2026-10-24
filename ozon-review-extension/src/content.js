@@ -149,21 +149,49 @@
       reviews: result.reviews,
       fetchedAt: new Date().toISOString(),
       stoppedReason: result.stoppedReason,
+      method: result.method,
     };
     if (!payload.reviews.length) {
+      const attempts = ((result.diagnostics && result.diagnostics.attempts) || [])
+        .map((a) => `<li><code>${esc(decodeURIComponent(a.url).replace(/^.*?url=/, ""))}</code> → ${esc(a.status)}${a.reviews ? `, отзывов: ${a.reviews}` : ""}</li>`)
+        .join("");
       body.innerHTML = `
         <div class="error">
           <b>Не удалось получить отзывы.</b>
           <p>${esc(result.stoppedReason || "Ozon не вернул ни одного отзыва.")}</p>
-          <p class="small">Обновите страницу (если Ozon показывал проверку «Вы не робот» — пройдите её) и попробуйте снова.
-          Если ошибка повторяется, возможно, Ozon изменил формат данных.</p>
+          <p class="small">1. Обновите страницу (F5); если Ozon показывает проверку «Вы не робот» — пройдите её.<br>
+          2. Прокрутите страницу товара до блока отзывов (чтобы Ozon сам их загрузил) и нажмите «Попробовать снова» —
+          расширение подсмотрит, как страница запрашивает отзывы.<br>
+          3. Если не помогло — нажмите «Скопировать диагностику» и пришлите текст разработчику.</p>
         </div>
-        <button class="primary run">Попробовать снова</button>`;
+        <button class="primary run">Попробовать снова</button>
+        <button class="secondary copy-diag">Скопировать диагностику</button>
+        ${attempts ? `<details class="diag small"><summary>Что пробовали (${result.diagnostics.attempts.length})</summary><ul>${attempts}</ul></details>` : ""}`;
       body.querySelector(".run").addEventListener("click", run);
+      body.querySelector(".copy-diag").addEventListener("click", (e) => copyDiagnostics(result, e.currentTarget));
       return;
     }
     await cacheSet(payload.product.sku || path, payload);
     renderResult(payload, false);
+  }
+
+  async function copyDiagnostics(result, btn) {
+    const text = JSON.stringify(
+      { version: chrome.runtime.getManifest().version, stoppedReason: result.stoppedReason, method: result.method, ...(result.diagnostics || {}) },
+      null,
+      1
+    );
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Скопировано ✓ — вставьте в сообщение";
+    } catch (_) {
+      // буфер обмена недоступен — показываем текст, чтобы скопировать вручную
+      const ta = document.createElement("textarea");
+      ta.className = "diag-text";
+      ta.value = text;
+      btn.after(ta);
+      ta.select();
+    }
   }
 
   // -------------------------------------------------------------- результат
