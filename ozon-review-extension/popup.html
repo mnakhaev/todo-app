@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Анализ отзывов Ozon</title>
+  <style>
+    :root { --bg: #fff; --text: #0b1220; --muted: #5b6577; --accent: #005bff; --soft: #f4f6f9; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #171b22; --text: #e8ecf2; --muted: #9aa4b5; --soft: #20252e; } }
+    body { margin: 0; width: 280px; padding: 16px; background: var(--bg); color: var(--text);
+           font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    button { width: 100%; padding: 10px; border: 0; border-radius: 10px; font: inherit; font-weight: 600;
+             background: var(--accent); color: #fff; cursor: pointer; margin-top: 6px; }
+    button.secondary { background: var(--soft); color: var(--text); }
+  </style>
+</head>
+<body>
+  <h1>Анализ отзывов Ozon</h1>
+  <p id="msg">Проверяю вкладку…</p>
+  <button id="run" hidden>Проанализировать отзывы</button>
+  <button id="open" class="secondary" hidden>Открыть панель</button>
+  <script src="popup.js"></script>
+</body>
+</html>

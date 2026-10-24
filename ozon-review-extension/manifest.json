@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Ozon: анализ отзывов",
+  "version": "1.0.0",
+  "description": "Проверяет отзывы о товаре на Ozon: доля накрученных отзывов, рейтинг без фейков, плюсы и минусы.",
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "permissions": ["storage", "activeTab"],
+  "action": {
+    "default_title": "Анализ отзывов Ozon",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.ozon.ru/*", "https://ozon.ru/*"],
+      "js": ["src/analyzer.js", "src/fetcher.js", "src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["src/panel.css"], "matches": ["https://www.ozon.ru/*", "https://ozon.ru/*"] }
+  ]
+}
